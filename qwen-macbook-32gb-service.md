@@ -13,6 +13,14 @@ coding model server, and use it from OpenCode on another MacBook on the same net
 > fit. Qwen releases often, so before you start, check https://huggingface.co/Qwen and
 > https://huggingface.co/unsloth for a newer coder GGUF that is ≤ ~20 GB, and swap the
 > model name in the commands below if there is one.
+>
+> **Update (checked 2026-10-18):** a newer, general-purpose Qwen exists that also fits:
+> **Qwen3.8-27B** (dense, Aug 2026; `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_M`, 16.5 GB). On its
+> model card it beats the older coder model on coding benchmarks, and its hybrid
+> architecture needs much less memory per token of context, so it can run 128k. The
+> trade-off is speed: being dense, it is several times slower per token than the 3B-active
+> Qwen3-Coder used below. This guide keeps Qwen3-Coder-30B-A3B as the fast default; see
+> `hugging-models.md` §4c for how to swap in Qwen3.8-27B or lighter models.
 
 ---
 
@@ -339,19 +347,58 @@ opencode run "explain what this repository does"
 Change one thing at a time and restart the service with
 `launchctl kickstart -k gui/$(id -u)/com.local.llama-server`.
 
-### 3.1 Longer context
+### 3.1 Context window
 
-Agentic coding eats context quickly. Quantizing the KV cache to 8-bit roughly halves its
-memory, so you can afford more context:
+Agentic coding eats context quickly: OpenCode's system prompt and tool definitions use
+roughly 10k tokens before you type anything, and every file read and command output
+adds to it. Three settings must agree:
+
+| Setting | Where | Meaning |
+|---|---|---|
+| Model's native context | model card | 262,144 tokens for Qwen3-Coder-30B-A3B |
+| `-c` | server (`llama-server`) | memory actually allocated. This is the real limit |
+| `limit.context` | `opencode.json` | what OpenCode thinks it may send; keep ≤ `-c` |
+
+**What a larger context costs.** The KV cache grows linearly with `-c` and is allocated
+up front. For Qwen3-Coder-30B-A3B it is about 96 KB per token:
+
+| `-c` | f16 cache | `-ctk q8_0 -ctv q8_0` | Total with Q4_K_M (18.6 GB) + ~1.5 GB | Verdict on 32 GB |
+|---|---|---|---|---|
+| 16384 | 1.6 GB | 0.8 GB | ≈ 22 GB | fine, but little room for OpenCode |
+| **32768** | 3.2 GB | 1.6 GB | ≈ 23 GB (f16) / 22 GB (q8) | **default** |
+| 65536 | 6.4 GB | 3.2 GB | ≈ 26.5 GB (f16) / 23 GB (q8) | needs the q8 cache |
+| 131072 | 12.9 GB | 6.4 GB | ≈ 33 GB / 27 GB | too much |
+| 262144 | 25.8 GB | 12.9 GB | does not fit | no |
+
+(`-ctk/-ctv` need `-fa on`; the totals must stay under the GPU limit of ~26 GB from §1.4,
+and ideally under ~24 GB so macOS keeps some headroom.)
+
+To go to 64k:
 
 ```
 -c 65536 -ctk q8_0 -ctv q8_0
 ```
 
-(requires `-fa on`). Update `limit.context` in `opencode.json` to match. Watch memory:
-if Activity Monitor shows heavy swap or "memory pressure" turning yellow/red, step back
-to `-c 32768`. Qwen3-Coder supports 256k natively, but on 32 GB, 64k is a realistic ceiling
-with this model.
+Then set `"limit": { "context": 65536, "output": 8192 }` in `opencode.json`, restart the
+service and check memory (Activity Monitor → Memory pressure should stay green; swap
+should stay near zero). If it turns yellow/red, step back to `-c 32768`.
+
+Practical advice:
+
+- **Longer prompts are slower.** Prompt processing is a few hundred tokens/s on this
+  hardware, so the first 50k-token prompt can take minutes. Later turns reuse the cache,
+  which is why long sessions are better than many short ones.
+- **Quality degrades before the limit.** Treat 32k–64k as the sweet spot; do not set a
+  larger value just because the model supports it.
+- **When OpenCode compacts.** It summarizes old turns when the conversation approaches
+  `limit.context`; a lower limit means more frequent compaction and lost detail.
+- **Out of memory on startup or mid-session** (server killed, `failed to allocate`):
+  lower `-c` first, then use the q8 cache, then a smaller quant.
+- **`--parallel N` divides `-c`** across slots (see §3.4).
+- **Beyond 256k (YaRN to 1M)** is not useful on 32 GB.
+- The model decides the cost: Qwen3.8-27B, a hybrid model, uses ~64 KB per token and
+  reaches 128k within the same budget. See `hugging-models.md` §2.6 for the formula,
+  per-model numbers and how to measure it from the server log.
 
 ### 3.2 Quantization trade-offs
 

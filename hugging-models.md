@@ -15,12 +15,14 @@ The runtime depends on the model type, not on the `.gguf` extension:
 | Embeddings / rerankers | Qwen3-Embedding | `llama-server --embedding` |
 | **Image generation** (diffusion) | **Qwen-Image**, FLUX, SDXL | `stable-diffusion.cpp` or ComfyUI + ComfyUI-GGUF |
 
-> **About `qwen-image-2.1-UC-BF16.gguf`:** Qwen-Image is an *image generation* model, so
-> it does **not** run in `llama-server` and can't be used by OpenCode. I couldn't verify
-> that exact filename or a "2.1" release; open the repo's *Files* tab and check what it
-> really is. Whatever it is, **BF16 is 16 bits per weight**. The Qwen-Image transformer
-> has ~20B parameters, so BF16 ≈ 40 GB: **it will not fit in 32 GB.** Pick a quantized
-> file (Q4/Q5/Q6/Q8) from the same repo, or from a GGUF repo of the same model (see §5).
+> **About `qwen-image-2.1-UC-BF16.gguf`:** it is real: 14.23 GB, in
+> `abenzerps/Qwen-Image-2.1-Uncensored-Quantized` ("UC" = an uncensored community
+> fine-tune of Qwen-Image-2.1). Qwen-Image is an *image generation* model, so it does
+> **not** run in `llama-server` and can't be used by OpenCode. Qwen-Image-2.1 has only
+> **7B** parameters (the first Qwen-Image had ~20B), so even BF16 (14 GB) **fits in 32 GB**,
+> though Q8_0 (7.6 GB) or Q4_K_M (4.2–4.6 GB) look almost the same and run faster. The
+> full image-generation setup, with fast and detailed profiles, is in
+> `image-generation.md`.
 
 ---
 
@@ -252,9 +254,11 @@ cmake -B build -DSD_METAL=ON && cmake --build build --config Release -j
 ```
 
 Qwen-Image needs **three** files: the diffusion model (the big GGUF), a VAE, and a
-Qwen2.5-VL text encoder. The exact flags change between releases; run
-`build/bin/sd-cli --help` (older builds: `build/bin/sd`) and the project's
-`docs/qwen_image.md` for the current ones. The shape is:
+text encoder. **Qwen-Image 2.1 uses Qwen3-VL-8B and its own VAE**
+(`qwen_image_2.1_vae_bf16.safetensors`); the older Qwen-Image used Qwen2.5-VL-7B, as in
+the sketch below, and the two are not interchangeable. The exact flags change between
+releases; run `build/bin/sd-cli --help` and the project's `docs/qwen_image_2.1.md`.
+`image-generation.md` has the verified 2.1 commands. The older-model shape is:
 
 ```bash
 build/bin/sd-cli \
@@ -283,18 +287,19 @@ activations at high resolution:
 total ≈ diffusion GGUF + text encoder (7B VL ≈ 5–8 GB at Q4–Q8) + VAE (~0.3 GB) + activations (1–4 GB)
 ```
 
-For a ~20B Qwen-Image transformer:
+For Qwen-Image-2.1 (7B; the older Qwen-Image was ~20B and would need ~2.5× these
+numbers), with a ≈ 5.2 GB Q4 text encoder:
 
-| Diffusion quant | File | + encoder (Q4) + VAE + activations | Fits 32 GB? |
+| Diffusion quant | File | + encoder + VAE + activations | Fits 32 GB? |
 |---|---|---|---|
-| BF16 | ~40 GB | ~48 GB | **No** |
-| Q8_0 | ~21 GB | ~29 GB | Only with CPU offload of the encoder, tight |
-| Q6_K | ~17 GB | ~25 GB | Yes, with `iogpu.wired_limit_mb` raised |
-| Q5_K_M / Q4_K_M | 12–14 GB | ~20–22 GB | Yes, comfortable |
+| BF16 / F16 | 14.2 GB | ~21–24 GB | Yes, with `iogpu.wired_limit_mb` raised; little gain over Q8 |
+| Q8_0 | 7.6 GB | ~15–17 GB | Yes, comfortable |
+| Q4_K_M | 4.2 GB | ~11–13 GB | Yes, publisher's recommended balance |
 
-Image models are more sensitive to quantization than text models; start at Q5/Q6 if it
-fits, and lower the resolution (768²) before dropping the quant if memory is tight. An
-M1 is slow at this size: expect minutes per image, not seconds.
+Image models are more sensitive to quantization than text models; use Q8_0 for quality
+and Q4_K_M for speed, and lower the resolution (768²) before dropping the quant if memory
+is tight. An M1 is slow at this: expect minutes per image, not seconds. Commands,
+profiles and remote access are in `image-generation.md`.
 
 ---
 
