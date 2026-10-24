@@ -1,311 +1,221 @@
-# KAT-Coder-V2.5-Dev on the MacBook M1 (32 GB) for OpenCode, with an external NVMe SSD
+# KAT-Coder-V2.5-Dev on a MacBook M1 (32 GB) for OpenCode: smart, not fast
 
-Adds `Kwaipilot/KAT-Coder-V2.5-Dev` to the service from `qwen-macbook-32gb-service.md`.
-Read that doc first: the launchd service, the API key, the GPU wired limit and the
-OpenCode client setup are unchanged. This doc only covers what is different.
+One model (`Kwaipilot/KAT-Coder-V2.5-Dev`), served by `llama-server` from the local disk,
+used from OpenCode. Two profiles: **256k context** (the model's native limit, use this)
+and **1M context** (YaRN-extended, with compromises).
 
-Checked 2026-10-24 against the model card and the Hugging Face API.
+Checked 2026-10-24 against the model card, `config.json` and the Hugging Face file listing.
+I have not run these commands on your machine. Sizes come from the repo listing, the
+memory numbers are my calculation, so confirm them with the server log (§6).
 
-## 1. What the model is
+The launchd service, the API key and the keep-awake/network setup are the same as in
+`qwen-macbook-32gb-service.md` (§1.2, 1.5–1.7); this doc repeats only what changes.
+
+## 1. The model
 
 | Item | Value |
 |---|---|
 | Base | post-trained from Qwen3.6-35B-A3B (SFT + RL), text only, Apache-2.0 |
-| Architecture | MoE, 35B total / ~3B active, 256 experts (8 per token), 40 layers |
-| Attention | hybrid: 1 full-attention layer in 4 (10 of 40), the rest linear attention |
-| Native context | 262,144 tokens (YaRN to ~1M possible, useless on 32 GB) |
-| Mode | **thinks by default** (`enable_thinking`); tool-call format `qwen3_coder` |
-| Reported (by Kwaipilot) | SWE-bench Verified 69.4, Terminal-Bench 2.1 41.0 |
+| Architecture | MoE, 35B total / ~3B active (256 experts, 8 per token), 40 layers |
+| Attention | hybrid: 10 of 40 layers use full attention, the rest linear attention |
+| Native context | 262,144 tokens; YaRN factor 4 gives ~1M |
+| Mode | thinks by default; tool calls use the `qwen3_coder` format |
+| Original size | 69 GB (BF16), so you run a quantized GGUF |
 
-Consequences for your Mac:
+KV cache is small because only 10 layers keep one: 10 layers × 2 KV heads × head dim 256
+× 2 (K and V) × 2 bytes ≈ **20 KB per token** at f16. The linear layers add a small fixed
+state (~0.1 GB).
 
-- Same class as the Qwen3-Coder-30B-A3B you run now: all 35B weights must sit in RAM,
-  ~3B are computed per token, so speed should be similar (roughly 30–50 tok/s on M1).
-- It is a bit **bigger** (35B vs 30B), so the quant matters more (§2).
-- The KV cache is tiny: 10 full-attention layers × 2 KV heads × head dim 256 × 2 (K and V)
-  × 2 bytes = **~20 KB per token**, versus ~96 KB for Qwen3-Coder. 128k context costs
-  ~2.6 GB. The linear-attention layers add a small fixed state (about 0.1 GB).
-  Verify with the `llama_kv_cache` line in the server log, as I derived this from
-  `config.json`, not from a measurement.
-- Thinking makes agent turns slower and uses context. See §5.
+## 2. Pick the file
 
-## 2. Which GGUF to pick
+From `bartowski/Kwaipilot_KAT-Coder-V2.5-Dev-GGUF`:
 
-The original is BF16 (~70 GB), so you need a quant. There are 70+ community GGUFs; these
-are the useful ones. Sizes from the Hugging Face file listing.
-
-| Repo : tag | Size | Verdict on 32 GB |
+| Quant | Size | Use |
 |---|---|---|
-| `bartowski/Kwaipilot_KAT-Coder-V2.5-Dev-GGUF:Q4_K_M` | 21.4 GB | tight: ~24.5 GB with 64k at q8 cache. Only with the §3 wired limit |
-| `bartowski/...:IQ4_XS` | 18.8 GB | **recommended**: near-Q4 quality, room for 128k |
-| `bartowski/...:Q4_K_S` | 20.6 GB | OK up to ~64k |
-| `bartowski/...:IQ3_M` / `Q3_K_M` | 16.9 / 16.2 GB | pick if you also run other apps |
-| `mudler/KAT-Coder-V2.5-Dev-APEX-GGUF` `APEX-I-Compact` | 16.5 GB | mixed-precision, designed to be small; popular (most downloaded) |
-| `mudler/...` `APEX-I-Mini` | 13.5 GB | lowest quality that I'd use for coding |
-| `bartowski/...:Q2_K` and IQ2 | 10–13 GB | avoid for code |
-| `*-MTP-*` repos | | MTP (speculative decoding) variants; need a very recent llama.cpp, so try later |
-| `*ABLITERATED*` | | safety-removed fine-tunes, not what you want for an agent |
+| `IQ4_XS` | 18.8 GB | **256k default**: ~23 GB total, safe headroom |
+| `Q4_K_M` | 21.4 GB | the smartest that can fit at 256k: ~25.5 GB total, very tight (see §4) |
+| `IQ3_M` | 16.9 GB | **1M profile**: needs the space for the cache |
 
-Budget: file + KV + ~1.5 GB overhead should stay under ~24 GB (GPU limit 26 GB from the
-Qwen doc §1.4). `IQ4_XS` at 128k with a q8 cache: 18.8 + 1.3 + 1.5 ≈ **21.6 GB**.
+Q6/Q8 (29 / 37 GB) do not fit in 32 GB. Disk is not a limit: your data volume has
+354 GB free.
 
-Caveats: I haven't run these quants on your hardware. Quality ranking between
-`IQ4_XS`, `APEX-I-Compact` and `Q4_K_M` is not something I can tell you; try two on your
-own repo. `IQ` quants decode a little slower than `Q4_K` on Apple GPUs.
-
-Needs a recent llama.cpp (Qwen3.5/3.6 hybrid architecture): `brew upgrade llama.cpp`
-and check `llama-server --version` reports a build from the last few months.
-
-## 3. External NVMe SSD
-
-### 3.1 Format: APFS
-
-Use **APFS** (the default, case-insensitive variant).
-
-APFS only shows up in Disk Utility's Format list if the drive uses the **GUID Partition
-Map** scheme. A new or previously used drive often has a different scheme, so the APFS
-option is missing. To initialize it:
-
-1. Disk Utility → View → **Show All Devices**.
-2. Select the top-level *drive* (the manufacturer/enclosure name), not the volume below it.
-3. Erase → Name: `Models`, Format: **APFS**, Scheme: **GUID Partition Map**.
-
-Do not enable encryption: an encrypted volume needs a password to mount and won't mount
-by itself after a headless reboot.
-
-Hardware notes:
-
-- M1 has no internal NVMe slot, so the enclosure is **USB 3.2 Gen 2 (10 Gbit/s) or
-  Thunderbolt/USB4**. Real reads: ~900 MB/s (USB 3.2 Gen 2) up to ~2.5 GB/s (TB3 enclosure
-  with a fast NVMe). Prefer a Thunderbolt/USB4 enclosure; a 20 GB model loads in ~10 s
-  rather than ~25 s.
-- The SSD speed matters only at **load time**: once the weights are mmapped into RAM,
-  token generation does not touch the disk (unless you run out of RAM and it starts to
-  page, which is the sign to use a smaller quant).
-- Plug it in directly, not through a hub, and keep the cable short.
-
-### 3.2 Prepare the volume
-
-Name the volume `Models` (mounts at `/Volumes/Models`):
+## 3. One-time setup
 
 ```bash
-diskutil list external            # find the disk id, e.g. disk4; check it's the SSD!
-# GUI (§3.1) is safer. CLI equivalent, which DESTROYS the disk:
-# diskutil eraseDisk APFS Models GPT /dev/disk4
+brew install llama.cpp huggingface-cli
+brew upgrade llama.cpp                 # the hybrid architecture needs a recent build
+llama-server --version
 
-mkdir -p /Volumes/Models/llama.cpp /Volumes/Models/gguf
-sudo mdutil -i off /Volumes/Models           # no Spotlight indexing of model files
-sudo mdutil -E /Volumes/Models >/dev/null    # drop any existing index
-touch /Volumes/Models/.metadata_never_index
-```
-
-Make sure the volume is not slept: `sudo pmset -a disksleep 0` (already in the Qwen doc §1.6).
-
-### 3.3 Put the models on it
-
-Either keep using `-hf` and move the cache, or download explicitly.
-
-**A. Move llama.cpp's cache to the SSD** (every `-hf` download goes there):
-
-```bash
-# already-downloaded files can be moved: mv ~/Library/Caches/llama.cpp/* /Volumes/Models/llama.cpp/
-export LLAMA_CACHE=/Volumes/Models/llama.cpp   # for the test run in the foreground
-```
-
-In the launchd plist add:
-
-```xml
-<key>EnvironmentVariables</key>
-<dict><key>LLAMA_CACHE</key><string>/Volumes/Models/llama.cpp</string></dict>
-```
-
-**B. Download a specific file (recommended, versions stay fixed):**
-
-```bash
+mkdir -p ~/models/kat-coder
 hf download bartowski/Kwaipilot_KAT-Coder-V2.5-Dev-GGUF \
-  --include "*IQ4_XS*" --local-dir /Volumes/Models/gguf/kat-coder
-# → /Volumes/Models/gguf/kat-coder/Kwaipilot_KAT-Coder-V2.5-Dev-IQ4_XS.gguf
+  --include "*IQ4_XS*" --local-dir ~/models/kat-coder
+# for the 1M profile also: --include "*IQ3_M*"
+
+openssl rand -hex 24                   # this is <API_KEY>
 ```
 
-### 3.4 Gotchas when the model lives on an external drive
-
-1. **Mount timing.** A LaunchAgent starts at login; the drive may not be mounted yet and
-   `KeepAlive` will restart-loop. Use a wrapper script that waits (§4.1). (Normally a drive
-   attached at boot mounts before login, but not after a USB hiccup.)
-2. **Privacy permission.** The first time a background process reads `/Volumes/...`, macOS
-   may silently deny it ("Removable Volumes"). If the log shows `Operation not permitted`,
-   add `/opt/homebrew/bin/llama-server` (and `/bin/bash` if you use the wrapper, and
-   `llama-swap`) under System Settings → Privacy & Security → **Full Disk Access**.
-   Test by rebooting without opening Terminal.
-3. **Always eject** (`diskutil unmount /Volumes/Models`) after stopping the service, or you
-   risk corruption. Stop it first: `launchctl bootout gui/$(id -u)/com.local.llama-server`.
-4. If the SSD disconnects mid-session the mmapped model can crash the server; launchd
-   restarts it once the wrapper sees the volume again.
-
-## 4. Ways to run it
-
-You asked for options for OpenCode. All of them expose an OpenAI-compatible `/v1` API.
-
-| Option | Pros | Cons | Use when |
-|---|---|---|---|
-| **A. `llama-server`, one model** (replace Qwen) | simplest, same as the working service, API key built in | one model at a time | you only want KAT |
-| **B. `llama-swap` + `llama-server`** | **both models, same port**, loads on demand, OpenCode lists both | extra component, swap takes 10–30 s | you want to keep Qwen3-Coder **and** KAT ("same service") |
-| C. MLX (`mlx_lm.server`) | often faster on Apple Silicon | weak auth/tool calling, less tested with OpenCode | experiments |
-| D. LM Studio / Ollama | GUI / easy pulls | LM Studio needs a logged-in GUI app; Ollama has no API key and small default context | not for a headless server |
-| E. vLLM / SGLang | model-card official | **CUDA/multi-GPU oriented; not for a 32 GB Mac** | no |
-
-Can KAT run on **the same service** (one `llama-server` process)? Not simultaneously:
-a `llama-server` process holds one model, and Qwen3-Coder (18.6 GB) + KAT (18.8 GB)
-don't fit together in 32 GB. Option B gives you one endpoint that swaps between them.
-
-### 4.1 Option A: launchd service for KAT only
-
-Wrapper that waits for the SSD (`~/bin/run-llama.sh`, `chmod +x`):
+Raise the GPU memory limit (resets on reboot; the persistent launch daemon is in
+`qwen-macbook-32gb-service.md` §1.4):
 
 ```bash
-#!/bin/bash
-# Wait up to 5 minutes for the model drive, then exec llama-server.
-MODEL=/Volumes/Models/gguf/kat-coder/Kwaipilot_KAT-Coder-V2.5-Dev-IQ4_XS.gguf
-for i in $(seq 1 60); do [ -f "$MODEL" ] && break; sleep 5; done
-[ -f "$MODEL" ] || { echo "model missing: $MODEL" >&2; exit 1; }
+sudo sysctl iogpu.wired_limit_mb=26624
+```
 
-exec /opt/homebrew/bin/llama-server \
-  -m "$MODEL" \
+Close other heavy apps on this Mac. The model, the cache and macOS share 32 GB.
+
+## 4. Profile A: 256k context (recommended)
+
+Run it in the foreground first:
+
+```bash
+llama-server \
+  -m ~/models/kat-coder/Kwaipilot_KAT-Coder-V2.5-Dev-IQ4_XS.gguf \
   --alias kat-coder \
-  --host 0.0.0.0 --port 8080 \
-  --api-key "$LLAMA_API_KEY" \
-  --jinja \
-  -ngl 99 \
-  -c 131072 -fa on -ctk q8_0 -ctv q8_0 \
+  --host 0.0.0.0 --port 8080 --api-key <API_KEY> \
+  --jinja -ngl 99 \
+  -c 262144 -fa on -ctk q8_0 -ctv q8_0 \
   -b 2048 -ub 1024 \
   --temp 1.0 --top-p 0.95 --top-k 20 --presence-penalty 1.5
 ```
 
-In the existing plist, change `ProgramArguments` to the script and pass the key via the
-environment (keeps it out of `ps`):
+Memory: 18.8 GB model + 2.6 GB cache (262,144 × 20 KB, halved by q8) + ~1.5 GB buffers
+≈ **23 GB**, under the 26 GB GPU limit.
+
+For more intelligence, swap in `Q4_K_M` (change the file name): ≈ 25.5 GB, which leaves
+almost nothing. Only keep it if Activity Monitor's memory pressure stays green and swap
+stays near 0 (`sysctl vm.swapusage`) during a long session. If it turns yellow, go back
+to `IQ4_XS`. The quality gap between the two is small.
+
+`q8_0` cache is close to lossless; don't go lower for coding.
+
+## 5. Profile B: 1M context (YaRN)
+
+```bash
+llama-server \
+  -m ~/models/kat-coder/Kwaipilot_KAT-Coder-V2.5-Dev-IQ3_M.gguf \
+  --alias kat-coder-1m \
+  --host 0.0.0.0 --port 8080 --api-key <API_KEY> \
+  --jinja -ngl 99 \
+  -c 1048576 --rope-scaling yarn --rope-scale 4 --yarn-orig-ctx 262144 \
+  -fa on -ctk q4_0 -ctv q4_0 \
+  -b 2048 -ub 512 \
+  --temp 1.0 --top-p 0.95 --top-k 20 --presence-penalty 1.5
+```
+
+Memory: 1,048,576 × 20 KB = 21 GB at f16, 10.5 GB at q8 (does not fit), **5.2 GB at q4_0**.
+So: 16.9 GB model + 5.2 GB cache + ~1.5 GB ≈ **24 GB**. That is the only combination I
+found that fits, and it costs you in two ways:
+
+- A 3-bit model and a 4-bit cache are both visibly less accurate than Profile A.
+- YaRN scaling is static: it is applied to every prompt, so short-prompt quality drops a
+  little as well (the model card says the same).
+
+Be realistic about using it. Prompt processing on M1 is a few hundred tokens/s, so
+filling even 500k tokens takes on the order of an hour on the first pass, and attention
+cost grows with length. I haven't tested that it holds up at that size. Use Profile B
+only for a task that really needs a whole huge codebase in one prompt, and run Profile A
+the rest of the time.
+
+If the server dies at start with `failed to allocate`, lower `-c` (for example 786432),
+keeping the same flags.
+
+## 6. Check it
+
+```bash
+curl http://localhost:8080/v1/models -H "Authorization: Bearer <API_KEY>"
+curl http://localhost:8080/v1/chat/completions \
+  -H "Authorization: Bearer <API_KEY>" -H "Content-Type: application/json" \
+  -d '{"model":"kat-coder","messages":[{"role":"user","content":"Reverse a linked list in Python."}]}'
+```
+
+The answer contains `reasoning_content` (the thinking) plus the final `content`. That is
+normal. The cache size appears in the startup log on the `llama_kv_cache` line; compare
+it with the numbers above. While working, watch Activity Monitor → Memory pressure.
+
+## 7. Run it as a service
+
+Same plist as `qwen-macbook-32gb-service.md` §1.5. Put these `ProgramArguments`
+(Profile A; for Profile B use the flags of §5):
 
 ```xml
-<key>ProgramArguments</key>
-<array><string>/Users/YOU/bin/run-llama.sh</string></array>
-<key>EnvironmentVariables</key>
-<dict><key>LLAMA_API_KEY</key><string><API_KEY></string></dict>
+<string>/opt/homebrew/bin/llama-server</string>
+<string>-m</string><string>/Users/YOU/models/kat-coder/Kwaipilot_KAT-Coder-V2.5-Dev-IQ4_XS.gguf</string>
+<string>--alias</string><string>kat-coder</string>
+<string>--host</string><string>0.0.0.0</string>
+<string>--port</string><string>8080</string>
+<string>--api-key</string><string><API_KEY></string>
+<string>--jinja</string>
+<string>-ngl</string><string>99</string>
+<string>-c</string><string>262144</string>
+<string>-fa</string><string>on</string>
+<string>-ctk</string><string>q8_0</string>
+<string>-ctv</string><string>q8_0</string>
+<string>-b</string><string>2048</string>
+<string>-ub</string><string>1024</string>
+<string>--temp</string><string>1.0</string>
+<string>--top-p</string><string>0.95</string>
+<string>--top-k</string><string>20</string>
+<string>--presence-penalty</string><string>1.5</string>
 ```
 
-Restart: `launchctl bootout …; launchctl bootstrap …` as in the Qwen doc §1.5.
+Use the absolute path (no `~`) for the model. Switching profiles means editing these
+arguments and running `launchctl bootout …` then `bootstrap …`, since one server holds
+one model.
 
-First test in the foreground (before launchd) with the exact same flags and a smaller
-`-c 32768` if you want to check memory first.
+## 8. OpenCode (workstation)
 
-### 4.2 Option B: `llama-swap` in front of both models
-
-```bash
-brew install llama-swap      # if the formula isn't found: brew install mostlygeek/llama-swap/llama-swap
-```
-
-`~/llama-swap.yaml` (each model's `llama-server` also checks the API key, because
-llama-swap forwards the `Authorization` header):
-
-```yaml
-healthCheckTimeout: 300        # the first load from the SSD can take a while
-models:
-  "qwen3-coder":
-    ttl: 1800                  # unload after 30 min idle (frees RAM)
-    cmd: >
-      /opt/homebrew/bin/llama-server --port ${PORT}
-      -m /Volumes/Models/gguf/qwen3-coder/Qwen3-Coder-30B-A3B-Instruct-Q4_K_M.gguf
-      --alias qwen3-coder --api-key <API_KEY> --jinja -ngl 99
-      -c 65536 -fa on -ctk q8_0 -ctv q8_0
-      --temp 0.7 --top-p 0.8 --top-k 20 --repeat-penalty 1.05
-  "kat-coder":
-    ttl: 1800
-    cmd: >
-      /opt/homebrew/bin/llama-server --port ${PORT}
-      -m /Volumes/Models/gguf/kat-coder/Kwaipilot_KAT-Coder-V2.5-Dev-IQ4_XS.gguf
-      --alias kat-coder --api-key <API_KEY> --jinja -ngl 99
-      -c 131072 -fa on -ctk q8_0 -ctv q8_0 -b 2048 -ub 1024
-      --temp 1.0 --top-p 0.95 --top-k 20 --presence-penalty 1.5
-```
-
-Only one runs at a time (llama-swap's default); requesting the other unloads the first.
-Run it in launchd the same way as §4.1, with `ProgramArguments`:
-`/opt/homebrew/bin/llama-swap --config /Users/YOU/llama-swap.yaml --listen 0.0.0.0:8080`.
-The firewall/Full Disk Access notes apply to `llama-swap` and the `llama-server` it spawns.
-Check the option names against `llama-swap --help` for your version.
-
-Recent `llama-server` builds also have a built-in router mode (several models, loaded on
-demand); look for `--models-dir` / `--models-preset` in `llama-server --help` if you'd
-rather avoid llama-swap. I haven't verified its behaviour here.
-
-### 4.3 Option C: MLX
-
-```bash
-pipx install mlx-lm
-mlx_lm.server --model mlx-community/KAT-Coder-V2.5-Dev-OptiQ-4bit --host 0.0.0.0 --port 8080
-HF_HOME=/Volumes/Models/hf   # put this in the environment to keep the download on the SSD
-```
-
-Check the repo's size first (§2.3 of `hugging-models.md`); a 4-bit 35B is ~19–20 GB.
-No API key option, and tool calling depends on the mlx-lm version, so test `/init` in
-OpenCode before relying on it. MLX also supports the qwen3_5_moe architecture only in
-recent releases (`pipx upgrade mlx-lm`).
-
-## 5. Thinking mode and sampling
-
-The card's settings, with `llama-server` flags:
-
-| Mode | Settings |
-|---|---|
-| Thinking (default) | `--temp 1.0 --top-p 0.95 --top-k 20 --presence-penalty 1.5` |
-| Non-thinking | `--temp 0.7 --top-p 0.8 --top-k 20 --presence-penalty 1.5` plus `--chat-template-kwargs '{"enable_thinking":false}'` |
-
-For OpenCode:
-
-- Start with **thinking on**: it's what the benchmarks used and what is best for hard
-  bugs. The reasoning goes into `reasoning_content`, and OpenCode shows it separately.
-- If agent loops are too slow or the context fills quickly, run non-thinking
-  (`enable_thinking:false`) for everyday edits. With llama-swap you can define two
-  entries with the same file, `kat-coder` and `kat-coder-fast`, differing only in this flag.
-- The card recommends `preserve_thinking: true` for agent use (keeps earlier reasoning in the
-  prompt, at a context cost): `--chat-template-kwargs '{"preserve_thinking":true}'`.
-  Whether the llama.cpp template honours it depends on the GGUF's embedded template, so
-  I haven't confirmed it works; leave it off first.
-- `presence-penalty 1.5` is unusually high, so if output gets odd (missing repeated
-  identifiers in code), lower it to ~0.5–1.0.
-- Tool calls use the `qwen3_coder` XML-ish format; `--jinja` is what makes llama-server
-  parse it. If edits fail or tool calls appear as plain text, update llama.cpp first.
-
-## 6. OpenCode client config
-
-Add to `~/.config/opencode/opencode.json` on the workstation (the key must equal `--alias`,
-or the llama-swap model name, and `limit.context` ≤ the server's `-c`):
+`~/.config/opencode/opencode.json`; the model key must equal `--alias`, and
+`limit.context` must not exceed `-c`:
 
 ```json
-"models": {
-  "qwen3-coder": { "name": "Qwen3-Coder 30B-A3B", "limit": { "context": 65536,  "output": 8192 } },
-  "kat-coder":   { "name": "KAT-Coder V2.5 Dev",  "limit": { "context": 131072, "output": 16384 } }
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "macserver": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "KAT-Coder (MacBook server)",
+      "options": {
+        "baseURL": "http://<SERVER_HOST>:8080/v1",
+        "apiKey": "{env:LLAMA_API_KEY}"
+      },
+      "models": {
+        "kat-coder": {
+          "name": "KAT-Coder V2.5 Dev",
+          "limit": { "context": 262144, "output": 32768 }
+        }
+      }
+    }
+  },
+  "model": "macserver/kat-coder",
+  "small_model": "macserver/kat-coder"
 }
 ```
 
-Leave `small_model` on `macserver/qwen3-coder` if you use llama-swap with `ttl`; if
-not, pointing it at KAT avoids a swap for titles. Switch models in the TUI with `/models`.
-With llama-swap each switch costs a reload (10–30 s from NVMe), so use it deliberately.
+For Profile B use the key `kat-coder-1m` and `"context": 1048576`. Set
+`export LLAMA_API_KEY="<API_KEY>"` in `~/.zshrc`. Titles and summaries also go to the
+same model, which is slow with thinking on but acceptable.
 
-## 7. Memory and speed check
+## 9. Settings that matter for "smart"
 
-```bash
-# during a long prompt (watch the pressure graph in Activity Monitor too)
-vm_stat 1 | head -5
-sysctl vm.swapusage          # should stay near 0
-grep -E "llama_kv_cache|CPU_Mapped|MTL.*buffer" ~/Library/Logs/llama/server.err.log
-```
+- **Keep thinking on** (the default). It is how the benchmarks were run. The card's
+  sampling (`temp 1.0, top-p 0.95, top-k 20, presence-penalty 1.5`) is what the commands
+  above use.
+- If code output drops repeated identifiers or looks odd, lower `--presence-penalty` to
+  ~0.5–1.0. This is my suggestion, not the card's.
+- Tool calls require `--jinja`. If edits fail or tool calls show up as plain text, update
+  llama.cpp first (`brew upgrade llama.cpp`).
+- Long sessions beat many short ones: the prompt cache reuses the shared prefix, and
+  at 256k the first big prompt is slow (minutes), the following turns are not.
+- Expect roughly 30–50 tokens/s once warm, less with a full context, and long thinking
+  before answers. That is the price of "smart".
 
-Stop increasing `-c` when memory pressure leaves green or swap grows. If it does, in order:
-lower `-c` to 65536, drop to `IQ3_M` / `APEX-I-Compact`, close other apps.
+## 10. Troubleshooting
 
-## 8. Recommendation
-
-1. Format the SSD **APFS** with the GUID Partition Map scheme (§3.1).
-2. Download `IQ4_XS` from bartowski to `/Volumes/Models/gguf/kat-coder/`.
-3. Run it in the foreground once (§4.1 flags, `-c 32768`) to confirm it loads and calls tools.
-4. Then set up **llama-swap** (§4.2) if you want both Qwen3-Coder and KAT; otherwise Option A.
-5. Compare the two on a real task in your repo before committing to a default.
+| Symptom | Fix |
+|---|---|
+| `failed to allocate` / killed at start | lower `-c`; check `sysctl iogpu.wired_limit_mb`; use a smaller quant |
+| Memory pressure yellow/red, swap grows | back to `IQ4_XS`, or lower `-c` to 131072 |
+| Unknown architecture error | `brew upgrade llama.cpp` |
+| 401 | `LLAMA_API_KEY` ≠ `--api-key` |
+| OpenCode "context exceeded" | `limit.context` larger than server `-c` |
+| Connection refused | server asleep or not running; see the Qwen doc §1.6–1.7 |
