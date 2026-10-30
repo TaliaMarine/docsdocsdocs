@@ -9,15 +9,15 @@ cd /path/to/REPO
 git remote -v
 ```
 
-You should see `origin` pointing at `bitbucket.org/avertis/REPO.git`.
+You should see `origin` pointing at `bitbucket.org/ORG/REPO.git`.
 
 ## 2. Point `origin` at GitHub
 
 ```sh
-git remote set-url origin https://github.com/AvertisSRL/REPO.git
+git remote set-url origin https://github.com/ORG/REPO.git
 ```
 
-(SSH instead: `git@github.com:AvertisSRL/REPO.git`.)
+(SSH instead: `git@github.com:ORG/REPO.git`.)
 
 This replaces the Bitbucket URL, so Bitbucket is no longer referenced.
 
@@ -53,7 +53,7 @@ Not needed after migration, but to keep it temporarily instead of replacing it:
 
 ```sh
 git remote rename origin bitbucket
-git remote add origin https://github.com/AvertisSRL/REPO.git
+git remote add origin https://github.com/ORG/REPO.git
 git fetch origin
 git branch -u origin/<branch> <branch>   # repeat per branch, or just: git push -u origin <branch>
 ```
